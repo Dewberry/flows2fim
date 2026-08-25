@@ -1,0 +1,87 @@
+name: Build and Test - Linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build flows2fim
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Compose
+      uses: docker/setup-buildx-action@v3
+
+    - name: Run Docker Compose
+      run: |
+        docker compose up -d
+        docker ps
+
+    - name: Attach to running container and Build
+      run: |
+        CONTAINER_ID=$(docker ps -q | head -n 1)
+        if [ -n "$CONTAINER_ID" ]; then
+          docker exec $CONTAINER_ID /bin/bash -c "./scripts/build-linux-amd64.sh"
+          docker compose down
+        else
+          echo "No running containers found"
+          exit 1
+        fi
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: flows2fim
+        path: builds/linux-amd64
+
+  test:
+    name: Test flows2fim
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: flows2fim
+        path: builds/linux-amd64
+
+    - name: Add flows2fim to PATH
+      run: |
+        ls -R builds/linux-amd64
+        sudo chmod a+x ./builds/linux-amd64/flows2fim
+        ./builds/linux-amd64/flows2fim --version
+        echo "builds/linux-amd64" >> $GITHUB_PATH
+
+    - name: Install & Configure GDAL
+      run: |
+        sudo apt-get update && sudo apt-get install -y gdal-bin
+        sudo chmod a+x /usr/lib/python3/dist-packages/osgeo_utils/samples/gdal_ls.py
+        echo "/usr/lib/python3/dist-packages/osgeo_utils/samples/" >> $GITHUB_PATH
+
+    - name: Verify gdal installation
+      run: |
+        gdalinfo --version
+        which gdal_ls.py
+
+    - name: Issue flows2fim controls test cases
+      run: |
+        ./scripts/test_suite_linux.sh controls
+
+    - name: Issue flows2fim fim test cases
+      run: |
+        ./scripts/test_suite_linux.sh fim
+
+    - name: Issue flows2fim validate test cases
+      run: |
+        ./scripts/test_suite_linux.sh validate

@@ -1,0 +1,8 @@
+services:
+  flows2fim:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+    entrypoint: [ sleep, infinity ]
