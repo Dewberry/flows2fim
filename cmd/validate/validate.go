@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -25,28 +24,17 @@ validate there is one to one correspondence between the entries of scenarios tab
 GDAL VSI paths can be used, given GDAL must have access to cloud creds.
 Intermediate folders for output files are created if they do not exist.
 
-Correspondence is judged against map_exists, which records whether a depth grid was
-written for the scenario. Three disagreements are reported, each to its own CSV:
-        o_fims             scenarios with map_exists=1 that have no FIM file
-        o_scenarios        FIM files with no scenario record at all
-        o_unexpected_fims  FIM files whose scenario says map_exists=0
+Correspondence is judged by matching each scenario's fim_path against the .tif files found
+in the library. Only scenarios with map_exists=1 carry a fim_path. Two disagreements are
+reported, each to its own CSV:
+        o_fims             scenarios with map_exists=1 whose fim_path has no file (or is empty)
+        o_scenarios        FIM files whose path is not the fim_path of any scenario
 Scenarios with map_exists=0 and no FIM file are the expected case and are not reported.
 
 FIM Library Specifications:
 - All maps should have same CRS, Resolution, vertical units (if any), and nodata value
-- Should have following folder structure:
-.
-├── 2821866
-│   ├── z_nd
-│   │   ├── f_10283.tif
-│   │   ├── f_104569.tif
-│   │   ├── f_11199.tif
-│   │   ├── f_112807.tif
-│   ├── z_53_5
-│       ├── f_102921.tif
-│       ├── f_10485.tif
-│       ├── f_111159.tif
-│       ├── f_11309.tif
+- fim_path values are relative to the library root and use '/' as separator
+- <reach_id>/domain.tif files are reach domains, not FIMs, and are ignored
 
 Database file must have a table 'scenarios' and contain following columns
         reach_id INTEGER
@@ -57,6 +45,7 @@ Database file must have a table 'scenarios' and contain following columns
         ds_wse REAL
         boundary_condition TEXT CHECK(boundary_condition IN ('nd','kwse'))
         map_exists BOOL CHECK(map_exists IN (0, 1))
+        fim_path TEXT
         UNIQUE(reach_id, us_flow, ds_wse, boundary_condition)
 
 
@@ -66,10 +55,7 @@ Arguments:`
 const (
 	queryCreateFIMEntTable = `
 	CREATE TABLE memdb.fim_entries (
-		reach_id INTEGER,
-		us_flow INTEGER,
-		ds_wse REAL,
-		boundary_condition TEXT
+		fim_path TEXT PRIMARY KEY
 	);
 	`
 
@@ -78,84 +64,37 @@ const (
 	SELECT
 		s.reach_id,
 		s.us_flow,
-		s.ds_wse,
-		s.boundary_condition
+		printf('%.1f', s.ds_wse) AS ds_wse,
+		s.boundary_condition,
+		COALESCE(s.fim_path, '') AS fim_path
 	FROM
 		scenarios s
 	LEFT JOIN
 		memdb.fim_entries f
-		ON (s.reach_id = f.reach_id
-			AND s.us_flow = f.us_flow
-			AND (CASE
-					WHEN s.boundary_condition = 'nd' THEN 0
-					ELSE s.ds_wse
-				END) = f.ds_wse
-			AND s.boundary_condition = f.boundary_condition)
+		ON s.fim_path = f.fim_path
 	WHERE
-		f.reach_id IS NULL
+		f.fim_path IS NULL
 		AND s.map_exists = 1
 	ORDER BY
 		s.reach_id, s.boundary_condition, s.ds_wse, s.us_flow;
 	`
 
-	// The mirror of the above: a raster is present even though the database says
-	// no depth grid was written for that scenario.
-	queryUnexpectedFims = `
-	SELECT
-		f.reach_id,
-		f.us_flow,
-		f.ds_wse,
-		f.boundary_condition
-	FROM
-		memdb.fim_entries f
-	JOIN
-		scenarios s
-		ON (f.reach_id = s.reach_id
-			AND f.us_flow = s.us_flow
-			AND f.ds_wse = (CASE
-					WHEN f.boundary_condition = 'nd' THEN 0
-					ELSE s.ds_wse
-				END)
-			AND f.boundary_condition = s.boundary_condition)
-	WHERE
-		s.map_exists = 0
-	ORDER BY
-		f.reach_id, f.boundary_condition, f.ds_wse, f.us_flow;
-	`
-
 	queryMissingScenarios = `
 	SELECT
-		f.reach_id,
-		f.us_flow,
-		f.ds_wse,
-		f.boundary_condition
+		f.fim_path
 	FROM
 		memdb.fim_entries f
 	LEFT JOIN
 		scenarios s
-		ON (f.reach_id = s.reach_id
-			AND f.us_flow = s.us_flow
-			AND f.ds_wse = (CASE
-					WHEN f.boundary_condition = 'nd' THEN 0
-					ELSE s.ds_wse
-				END)
-			AND f.boundary_condition = s.boundary_condition)
+		ON s.fim_path = f.fim_path
 	WHERE
-		s.reach_id IS NULL
+		s.fim_path IS NULL
 	ORDER BY
-		f.reach_id, f.boundary_condition, f.ds_wse, f.us_flow;
+		f.fim_path;
 	`
 )
 
 var extIgnore = []string{".aux", ".aux.xml", ".ovr", ".xml", ".tfw"}
-
-// fimRow represents a single record discovered in the FIM library
-type fimRow struct {
-	reachID           int
-	usFlow            int
-	dsWse             float64
-	boundaryCondition string
-}
 
 // dirEntry holds a path + info about whether it's a directory
 type dirEntry struct {
@@ -247,9 +186,8 @@ func gatherVSIEntries(dir string, recursive bool) ([]dirEntry, error) {
 	return results, nil
 }
 
-// processLibEntry parse boundary condition folders (z_XXX) and flow tif files (f_*.tif) from dirEntry path.
-// It sends the parsed data to fimChan channel
-func processLibEntry(e dirEntry, absFimLibDir string, fimChan chan<- fimRow) {
+// processLibEntry sends the library-relative, '/'-separated path of a FIM file to fimChan.
+func processLibEntry(e dirEntry, absFimLibDir string, fimChan chan<- string) {
 	// Skip directories
 	if e.isDir {
 		return
@@ -260,10 +198,8 @@ func processLibEntry(e dirEntry, absFimLibDir string, fimChan chan<- fimRow) {
 		slog.Error("Relative path resolution failed", "path", e.path, "error", relErr)
 		return
 	}
-	// On windows relPath will have backslashes, convert to forward slashes for /vsi paths
-	if strings.HasPrefix(absFimLibDir, "/vsi") {
-		relPath = filepath.ToSlash(relPath)
-	}
+	// fim_path values in the database always use forward slashes
+	relPath = filepath.ToSlash(relPath)
 
 	name := filepath.Base(e.path)
 	ext := filepath.Ext(name)
@@ -274,62 +210,15 @@ func processLibEntry(e dirEntry, absFimLibDir string, fimChan chan<- fimRow) {
 		return
 	}
 
-	if !strings.HasPrefix(name, "f_") {
-		slog.Warn("Invalid file prefix", "path", relPath)
+	if name == "domain.tif" && strings.Count(relPath, "/") == 1 {
 		return
 	}
 
-	usFlowStr := strings.TrimSuffix(strings.TrimPrefix(name, "f_"), ".tif")
-	usFlow, convErr := strconv.Atoi(usFlowStr)
-	if convErr != nil {
-		slog.Error("Invalid flow value", "path", relPath, "value", usFlowStr)
-		return
-	}
-
-	parts := strings.Split(relPath, string(os.PathSeparator))
-	if len(parts) != 3 {
-		slog.Error("Invalid path structure", "path", relPath)
-		return
-	}
-	reachIDStr := parts[0]
-	dirName := parts[1] // z_XXX
-	reachID, err := strconv.Atoi(reachIDStr)
-	if err != nil {
-		slog.Error("Invalid reach ID", "path", relPath, "value", parts[0])
-		return
-	}
-	if !strings.HasPrefix(dirName, "z_") {
-		slog.Error("Invalid boundary condition", "path", relPath)
-		return
-	}
-	dirSuffix := strings.TrimPrefix(dirName, "z_")
-
-	var bc string
-	var dsWse float64
-	if dirSuffix == "nd" {
-		bc = "nd"
-		dsWse = 0.0
-	} else {
-		bc = "kwse"
-		dsWseStr := strings.ReplaceAll(dirSuffix, "_", ".")
-		dsWseFloat, parseErr := strconv.ParseFloat(dsWseStr, 64)
-		if parseErr != nil {
-			slog.Error("Invalid downstream WSE", "path", relPath)
-			return
-		}
-		dsWse = dsWseFloat
-	}
-
-	fimChan <- fimRow{
-		reachID:           reachID,
-		usFlow:            usFlow,
-		dsWse:             dsWse,
-		boundaryCondition: bc,
-	}
+	fimChan <- relPath
 }
 
-// batchInsertFIMs insert FIM rows in batches
-func batchInsertFIMs(db *sql.DB, fimChan <-chan fimRow) error {
+// batchInsertFIMs insert FIM paths in batches
+func batchInsertFIMs(db *sql.DB, fimChan <-chan string) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -342,7 +231,7 @@ func batchInsertFIMs(db *sql.DB, fimChan <-chan fimRow) error {
 	}()
 
 	const batchSize = 1000
-	batch := make([]fimRow, 0, batchSize)
+	batch := make([]string, 0, batchSize)
 
 	commitBatch := func() error {
 		if len(batch) == 0 {
@@ -351,14 +240,14 @@ func batchInsertFIMs(db *sql.DB, fimChan <-chan fimRow) error {
 
 		// Can't do prepared statement as the final batch would not be of same size
 		// Build single statement for multi-VALUES insert
-		// INSERT INTO memdb.fim_entries(reach_id, us_flow, ds_wse, boundary_condition) VALUES (?, ?, ?, ?), (?, ?, ?, ?) ...
-		sqlStr := "INSERT INTO memdb.fim_entries(reach_id, us_flow, ds_wse, boundary_condition) VALUES "
-		vals := make([]interface{}, 0, len(batch)*4)
+		// INSERT OR IGNORE INTO memdb.fim_entries(fim_path) VALUES (?), (?) ...
+		sqlStr := "INSERT OR IGNORE INTO memdb.fim_entries(fim_path) VALUES "
+		vals := make([]interface{}, 0, len(batch))
 		placeholders := make([]string, 0, len(batch))
 
-		for _, r := range batch {
-			placeholders = append(placeholders, "(?,?,?,?)")
-			vals = append(vals, r.reachID, r.usFlow, r.dsWse, r.boundaryCondition)
+		for _, p := range batch {
+			placeholders = append(placeholders, "(?)")
+			vals = append(vals, p)
 		}
 		sqlStr += strings.Join(placeholders, ",")
 
@@ -397,8 +286,14 @@ func writeCSV(rows *sql.Rows, outFile string, skipEmpty bool) (int, error) {
 	// An approach that was first adopted and discarded was to write to a temp file in tmp folder and then rename it only if rows exist,
 	// but that approach cause inter-device rename error on conatinerized environment with file mounts.
 
-	rowCount := 0
-	if !rows.Next() {
+	// Columns must be read before Next, which closes rows when there are none
+	cols, err := rows.Columns()
+	if err != nil {
+		return 0, fmt.Errorf("error reading columns: %v", err)
+	}
+
+	hasRow := rows.Next()
+	if !hasRow {
 		// No row was found if rows.Err() == nil.
 		if err := rows.Err(); err != nil {
 			return 0, fmt.Errorf("error reading rows: %v", err)
@@ -406,8 +301,6 @@ func writeCSV(rows *sql.Rows, outFile string, skipEmpty bool) (int, error) {
 		if skipEmpty {
 			return 0, nil
 		}
-	} else {
-		rowCount++
 	}
 
 	// Create intermediate directories if they do not exist
@@ -428,48 +321,33 @@ func writeCSV(rows *sql.Rows, outFile string, skipEmpty bool) (int, error) {
 	}()
 
 	w := csv.NewWriter(tempFile)
-	if err := w.Write([]string{"reach_id", "us_flow", "ds_wse", "boundary_condition"}); err != nil {
+	if err := w.Write(cols); err != nil {
 		return 0, fmt.Errorf("error writing CSV header: %v", err)
 	}
 
-	if rowCount != 0 {
-		var reachID, usFlow int
-		var dsWse float64
-		var bc string
-		if err := rows.Scan(&reachID, &usFlow, &dsWse, &bc); err != nil {
-			return 0, fmt.Errorf("error scanning first row: %v", err)
-		}
+	vals := make([]sql.NullString, len(cols))
+	ptrs := make([]interface{}, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	record := make([]string, len(cols))
 
-		if err := w.Write([]string{
-			strconv.Itoa(reachID),
-			strconv.Itoa(usFlow),
-			fmt.Sprintf("%.1f", dsWse),
-			bc,
-		}); err != nil {
-			return 0, fmt.Errorf("error writing first row to CSV: %v", err)
+	rowCount := 0
+	// rows is already positioned on the first row, if there is one
+	for ; hasRow; hasRow = rows.Next() {
+		if err := rows.Scan(ptrs...); err != nil {
+			return 0, fmt.Errorf("error scanning row: %v", err)
 		}
-
-		// Process remaining rows
-		for rows.Next() {
-			var reachID, usFlow int
-			var dsWse float64
-			var bc string
-			if err := rows.Scan(&reachID, &usFlow, &dsWse, &bc); err != nil {
-				return 0, fmt.Errorf("error scanning row: %v", err)
-			}
-			if err := w.Write([]string{
-				strconv.Itoa(reachID),
-				strconv.Itoa(usFlow),
-				fmt.Sprintf("%.1f", dsWse),
-				bc,
-			}); err != nil {
-				return 0, fmt.Errorf("error writing CSV record: %v", err)
-			}
-			rowCount++
+		for i, v := range vals {
+			record[i] = v.String
 		}
-		if err := rows.Err(); err != nil {
-			return 0, fmt.Errorf("error from rows iteration: %v", err)
+		if err := w.Write(record); err != nil {
+			return 0, fmt.Errorf("error writing CSV record: %v", err)
 		}
+		rowCount++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("error from rows iteration: %v", err)
 	}
 
 	w.Flush()
@@ -495,20 +373,18 @@ func Run(args []string) error {
 	}
 
 	var (
-		dbPath            string
-		fimLibDir         string
-		outFims           string
-		outScenarios      string
-		outUnexpectedFims string
-		concurrent        int
-		skipEmpty         bool
+		dbPath       string
+		fimLibDir    string
+		outFims      string
+		outScenarios string
+		concurrent   int
+		skipEmpty    bool
 	)
 
 	flags.StringVar(&dbPath, "db", "", "Path to the scenarios database file")
 	flags.StringVar(&fimLibDir, "lib", "", "Path to the FIM library directory")
 	flags.StringVar(&outFims, "o_fims", "missing_fims.csv", "Output CSV for scenario entries with map_exists=1 missing corresponding FIM files")
 	flags.StringVar(&outScenarios, "o_scenarios", "missing_scenarios.csv", "Output CSV for FIM entries missing corresponding scenario records")
-	flags.StringVar(&outUnexpectedFims, "o_unexpected_fims", "unexpected_fims.csv", "Output CSV for FIM entries whose scenario records have map_exists=0")
 	flags.IntVar(&concurrent, "cc", 25, "Concurrent Count, number of top-level reach directories to process concurrently (default 25)")
 	flags.BoolVar(&skipEmpty, "skip_empty", false, "If true, do not create an empty output CSV file")
 
@@ -543,6 +419,9 @@ func Run(args []string) error {
 	if err := utils.CheckScenariosTable(db); err != nil {
 		return err
 	}
+	if err := utils.CheckFimPathColumn(db); err != nil {
+		return err
+	}
 
 	// 2) Attach an in-memory DB for fim_entries
 	_, err = db.Exec(`ATTACH ':memory:' AS memdb;`)
@@ -568,7 +447,7 @@ func Run(args []string) error {
 	}
 
 	// 3) Setup concurrency
-	fimChan := make(chan fimRow, 2000) // buffer for discovered rows
+	fimChan := make(chan string, 2000) // buffer for discovered FIM paths
 	var batchWG sync.WaitGroup
 
 	// Single writer goroutine that batch-inserts rows into memdb.fim_entries
@@ -607,22 +486,24 @@ func Run(args []string) error {
 
 	var reachDir string
 	for _, de := range libEntries {
-		if de.isDir {
-			wg.Add(1)
-			sem <- struct{}{} // Acquire concurrency token
-			go func(reachDir string) {
-				defer wg.Done()
-				defer func() { <-sem }() // Release token
-				reachEntries, err := readDir(de.path, true)
-				if err != nil {
-					slog.Warn("Reach directory read error", "path", de.path, "error", err)
-					return
-				}
-				for _, e := range reachEntries {
-					processLibEntry(e, absFimLibDir, fimChan)
-				}
-			}(reachDir)
+		if !de.isDir {
+			processLibEntry(de, absFimLibDir, fimChan)
+			continue
 		}
+		wg.Add(1)
+		sem <- struct{}{} // Acquire concurrency token
+		go func(reachDir string) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release token
+			reachEntries, err := readDir(de.path, true)
+			if err != nil {
+				slog.Warn("Reach directory read error", "path", de.path, "error", err)
+				return
+			}
+			for _, e := range reachEntries {
+				processLibEntry(e, absFimLibDir, fimChan)
+			}
+		}(reachDir)
 	}
 
 	// Wait for all reach processing goroutines to finish
@@ -638,7 +519,6 @@ func Run(args []string) error {
 	}{
 		{outFims, queryMissingFims, "missing FIMs"},
 		{outScenarios, queryMissingScenarios, "missing scenarios"},
-		{outUnexpectedFims, queryUnexpectedFims, "unexpected FIMs"},
 	}
 	for _, task := range tasks {
 		rows, err := db.Query(task.query)

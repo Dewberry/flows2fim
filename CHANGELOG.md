@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `controls` and `validate` now fail with an actionable message, including SQL to backfill the column, when the `scenarios` table has no `fim_path` column
+- `controls` output file now has a `fim_path` column, appended after `map_exists`
+
+### Changed
+
+- **BREAKING** - FIM file paths are now read from a `fim_path` column in the `scenarios` table (relative to the FIM library root) instead of being derived from the `<reach_id>/z_<stage>/f_<flow>.tif` folder layout. `controls` requires the column, and `fim` requires it in the controls file and resolves relative paths against `-lib`. Absolute and GDAL VSI paths are used as-is
+- `fim` no longer requires the `z_<stage>/f_<flow>.tif` library layout. `domain.tif` is still read from `<lib>/<reach_id>/` when `-with_domain` is set
+- **BREAKING** - `validate` now matches library `.tif` files against `scenarios.fim_path` instead of parsing reach, flow and stage out of the folder layout, so any file layout is accepted. `<reach_id>/domain.tif` files are ignored. Scenarios with `map_exists = 1` and an empty `fim_path` are reported as missing FIMs
+- **BREAKING** - `validate` output columns: `-o_fims` gains a trailing `fim_path` column, and `-o_scenarios` now has a single `fim_path` column, since unmatched files are no longer parsed into scenario fields
+
+### Removed
+
+- **BREAKING** - `validate` flag `-o_unexpected_fims` and its check. `fim_path` is only recorded for `map_exists = 1` scenarios, so a raster for a mapless scenario cannot be matched to it; such files are reported in `-o_scenarios` instead
+
 ## [0.5.0] - 2026-08-04
 
 **Note:** Compatible with outputs from Ripple1D Pipeline version 0.11.0 (the release containing the `scenarios` rename) to present. Not compatible with earlier outputs, which carry a `rating_curves` table instead, see the Changed section below.

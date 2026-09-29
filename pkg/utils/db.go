@@ -89,3 +89,32 @@ func CheckScenariosTable(db *sql.DB) error {
 
 	return nil
 }
+
+// FimPathColumn holds each scenario's FIM file path, relative to the FIM library root.
+const FimPathColumn = "fim_path"
+
+// CheckFimPathColumn verifies ScenariosTable has FimPathColumn, and returns an
+// actionable error, with SQL that backfills it from the legacy folder layout, when it does not.
+func CheckFimPathColumn(db *sql.DB) error {
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?;`, ScenariosTable, FimPathColumn).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("error inspecting '%s' columns: %w", ScenariosTable, err)
+	}
+	if count > 0 {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"database table '%[1]s' has no '%[2]s' column. FIM file paths are now read from the database "+
+			"instead of being derived from the library folder layout. "+
+			"Regenerate the database with a matching ripple1d-pipeline release, or add it in place for a library using the "+
+			"<reach_id>/z_<stage>/f_<flow>.tif layout with\n"+
+			"  ALTER TABLE %[1]s ADD COLUMN %[2]s TEXT;\n"+
+			"  UPDATE %[1]s SET %[2]s = reach_id || '/z_' ||\n"+
+			"    CASE boundary_condition WHEN 'nd' THEN 'nd' ELSE replace(printf('%%.1f', ds_wse), '.', '_') END ||\n"+
+			"    '/f_' || us_flow || '.tif'\n"+
+			"  WHERE map_exists = 1;",
+		ScenariosTable, FimPathColumn,
+	)
+}
