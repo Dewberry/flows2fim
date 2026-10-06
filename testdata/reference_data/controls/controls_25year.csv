@@ -1,2 +1,2 @@
-reach_id,flow,control_stage,map_exists
-24274741,43213,nd,1
+reach_id,flow,control_stage,map_exists,fim_path
+24274741,43213,nd,1,24274741/z_nd/f_43213.tif

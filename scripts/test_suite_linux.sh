@@ -276,7 +276,7 @@ controls_test_cases() {
         # Remove temp file
         rm "$tempfile"
         # Assign error string
-        assert_file_output="reach_id,flow,control_stage,map_exists"
+        assert_file_output="reach_id,flow,control_stage,map_exists,fim_path"
         # Compare Error messaging and print
         if [ "$file_contents" = "$assert_file_output" ]; then
             printf "\t \u2714 Passed: Output file created and empty. \n\n"
@@ -364,11 +364,11 @@ controls_test_cases() {
             -f "$temp_flows" \
             -o "$temp_out" \
             -scsv $start_reaches_dir/start_reaches.csv &> /dev/null
-        # The mapless scenario should be the one picked, flagged with a trailing 0
-        if grep -q "^24274741,70000,nd,0$" "$temp_out"; then
+        # The mapless scenario should be the one picked, flagged with map_exists=0 and an empty fim_path
+        if grep -q "^24274741,70000,nd,0,$" "$temp_out"; then
             printf "\t ✔ Passed: mapless scenario selected and flagged map_exists=0. \n\n"
         else
-            printf "\t ❌ Failed: expected 24274741,70000,nd,0 in controls file, got: $(tail -n 1 "$temp_out") \n\n"
+            printf "\t ❌ Failed: expected 24274741,70000,nd,0, in controls file, got: $(tail -n 1 "$temp_out") \n\n"
             failed_controls_testcases=$((failed_controls_testcases + 1))
         fi
         # Remove temp files
@@ -380,7 +380,7 @@ controls_test_cases() {
 }
 
 fim_test_cases() {
-    local num_test_cases_fim=10
+    local num_test_cases_fim=11
     local failed_fim_testcases=0
     total_count=$(( total_count + num_test_cases_fim))
     # If previous directories exists, remove them
@@ -539,7 +539,7 @@ fim_test_cases() {
         temp_controls=$(mktemp)
         # Only record is flagged as having no map, so there is nothing left to
         # composite. fim must say so rather than handing GDAL a missing raster.
-        printf "reach_id,flow,control_stage,map_exists\n24274741,17668,nd,0\n" > "$temp_controls"
+        printf "reach_id,flow,control_stage,map_exists,fim_path\n24274741,17668,nd,0,\n" > "$temp_controls"
         # Test case
         $cmd fim \
                 -c "$temp_controls" \
@@ -563,9 +563,9 @@ fim_test_cases() {
         # Create and assign temp files
         tempfile=$(mktemp)
         temp_controls=$(mktemp)
-        # Controls files written before 0.5.0 have no map_exists column. They must
-        # keep working, with a warning that map existence is unknown.
-        printf "reach_id,flow,control_stage\n24274741,17668,nd\n" > "$temp_controls"
+        # A controls file without a map_exists column must keep working, with a
+        # warning that map existence is unknown.
+        printf "reach_id,flow,control_stage,fim_path\n24274741,17668,nd,24274741/z_nd/f_17668.tif\n" > "$temp_controls"
         # Test case
         $cmd fim \
                 -c "$temp_controls" \
@@ -585,7 +585,33 @@ fim_test_cases() {
         rm "$tempfile"
         rm "$temp_controls"
 
-    #printf "(11/${num_test_cases_fim})\t>>>> Test flows2fim fim pull from S3 <<<<\n\n"
+    printf "(11/${num_test_cases_fim})\t>>>> Controls file without a fim_path column is rejected <<<<\n\n"
+        # Create and assign temp files
+        tempfile=$(mktemp)
+        temp_controls=$(mktemp)
+        # FIM paths are no longer derived from the folder layout, so a controls
+        # file without them cannot be composited.
+        printf "reach_id,flow,control_stage,map_exists\n24274741,17668,nd,1\n" > "$temp_controls"
+        # Test case
+        $cmd fim \
+                -c "$temp_controls" \
+                -fmt $format \
+                -lib $library_benchmark \
+                -o $fim_test_outputs/fim_no_fim_path.tif &> "$tempfile"
+        # Assign error string
+        expected_error_substring="controls file has no fim_path column"
+        # Search (grep) for expected error substring in temporary output file
+        if grep -q "$expected_error_substring" "$tempfile"; then
+            printf "\t ✔ Correct error thrown. \n\n"
+        else
+            printf "\t ❌ Error messaging inconsistent \n\n"
+            failed_fim_testcases=$((failed_fim_testcases + 1))
+        fi
+        # Remove temp files
+        rm "$tempfile"
+        rm "$temp_controls"
+
+    #printf "(12/${num_test_cases_fim})\t>>>> Test flows2fim fim pull from S3 <<<<\n\n"
 
     fim_passed=$((num_test_cases_fim - failed_fim_testcases))
     total_passed=$(( total_passed + fim_passed))

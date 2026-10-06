@@ -16,27 +16,17 @@ var usage string = `Usage of fim:
 Given a control table and a fim library folder, create a composite flood inundation map for the control conditions.
 GDAL VSI paths can be used (only for library and not for output), given GDAL must have access to cloud creds.
 
+FIM file paths are read from the control table's 'fim_path' column (as written by 'flows2fim controls'),
+resolved relative to the library folder. Absolute and GDAL VSI paths in that column are used as-is.
+
 FIM Library Specifications:
 - All maps should have same CRS, Resolution, data type, vertical units (if any), and nodata value
-- Should have following folder structure:
+- If -with_domain is used, each reach folder must hold a domain.tif:
 .
 ├── 2821866
-│   ├── z_nd
-│   │   ├── f_10283.tif
-│   │   ├── f_104569.tif
-│   │   ├── f_11199.tif
-│   │   ├── f_112807.tif
-│   │   ...
-│   ├── z_53_5
-│   │   ├── f_102921.tif
-│   │   ├── f_10485.tif
-│   │   ├── f_111159.tif
-│   │   ├── f_11309.tif
-│   │   ...
-│   ...
-│   └── domain.tif (optional)
+│   ├── ... (FIM files at the paths listed in the control table)
+│   └── domain.tif
 ├── 2821867
-│   ├── z_nd
 ...
 
 Arguments:` // Usage should be always followed by PrintDefaults()
@@ -127,14 +117,19 @@ func Run(args []string) (gdalArgs []string, err error) {
 		return []string{}, fmt.Errorf("not enough columns in controls file, need at least 3")
 	}
 
-	// Locate map_exists by header name rather than position, so additional
+	// Locate map_exists and fim_path by header name rather than position, so additional
 	// columns can be added to the controls file later without breaking this.
-	mapExistsIdx := -1
+	mapExistsIdx, fimPathIdx := -1, -1
 	for i, name := range records[0] {
-		if strings.TrimSpace(name) == "map_exists" {
+		switch strings.TrimSpace(name) {
+		case "map_exists":
 			mapExistsIdx = i
-			break
+		case "fim_path":
+			fimPathIdx = i
 		}
+	}
+	if fimPathIdx == -1 {
+		return []string{}, fmt.Errorf("controls file has no fim_path column; regenerate it with 'flows2fim controls' from a database that has a fim_path column")
 	}
 	if mapExistsIdx == -1 {
 		slog.Warn("controls file has no map_exists column; assuming every record has a map", "file", controlsFile)
@@ -156,16 +151,26 @@ func Run(args []string) (gdalArgs []string, err error) {
 			}
 		}
 
-		record[2] = strings.Replace(record[2], ".", "_", -1) // Replace '.' with '_'
-		folderPath := filepath.Join(absFimLibPath, reachID, fmt.Sprintf("z_%s", record[2]))
-		fileName := fmt.Sprintf("f_%s.tif", record[1])
-		absFIMPath := filepath.Join(folderPath, fileName)
+		var fimPath string
+		if fimPathIdx < len(record) {
+			fimPath = strings.TrimSpace(record[fimPathIdx])
+		}
+		if fimPath == "" {
+			return []string{}, fmt.Errorf("record for reach %s (flow %s, control stage %s) has a map but no fim_path", reachID, record[1], record[2])
+		}
+
+		absFIMPath := fimPath
+		if !strings.HasPrefix(fimPath, "/vsi") && !filepath.IsAbs(fimPath) {
+			absFIMPath = filepath.Join(absFimLibPath, fimPath)
+		}
 		absDomainPath := filepath.Join(absFimLibPath, reachID, "domain.tif")
 
 		// join on windows may cause \vsi
 		if strings.HasPrefix(absFIMPath, `\vsi`) {
-			absDomainPath = strings.ReplaceAll(absDomainPath, `\`, "/")
 			absFIMPath = strings.ReplaceAll(absFIMPath, `\`, "/")
+		}
+		if strings.HasPrefix(absDomainPath, `\vsi`) {
+			absDomainPath = strings.ReplaceAll(absDomainPath, `\`, "/")
 		}
 
 		fimFiles = append(fimFiles, absFIMPath)
