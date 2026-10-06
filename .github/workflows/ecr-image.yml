@@ -2,7 +2,7 @@ name: Push ECR image
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths-ignore:
       - 'infrastructure/**'
       - 'infrastructure-as-code/**'
@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   push:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
