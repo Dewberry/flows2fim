@@ -2,12 +2,12 @@ name: Deploy ECR infrastructure
 
 on:
   pull_request:
-    branches: [main]
+    branches: [master]
     paths:
       - 'infrastructure/**'
       - '.github/workflows/infrastructure.yml'
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'infrastructure/**'
       - '.github/workflows/infrastructure.yml'
@@ -36,7 +36,7 @@ jobs:
       - run: uv run --locked  cdk synth
 
   deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
