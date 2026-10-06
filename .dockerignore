@@ -1,0 +1,11 @@
+.env*
+**/.env*
+.aws/
+**/.aws/
+*.pem
+*.key
+.venv/
+cdk.out/
+**/__pycache__/
+infrastructure/
+infrastructure-as-code/

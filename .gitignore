@@ -25,6 +25,14 @@ builds/*
 # Go workspace file
 go.work
 
+# Python CDK tooling and synthesized templates
+.venv/
+__pycache__/
+*.egg-info/
+.ruff_cache/
+.pyright/
+cdk.out/
+
 # Data files
 *.csv
 *.vrt

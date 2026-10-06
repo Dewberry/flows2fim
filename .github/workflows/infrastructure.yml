@@ -1,0 +1,65 @@
+name: Deploy ECR infrastructure
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infrastructure/**'
+      - '.github/workflows/infrastructure.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/**'
+      - '.github/workflows/infrastructure.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infrastructure
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global aws-cdk@2.1143.0
+      - run: uv sync --locked 
+      - run: uv run --locked  ruff check app.py
+      - run: uv run --locked  pyright
+      - run: uv run --locked  cdk synth
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infrastructure
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: flows2fim-registry
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global aws-cdk@2.1143.0
+      - run: uv sync --locked
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CDK_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: uv run --locked cdk synth
+      - run: uv run --locked cdk deploy --require-approval never --role-arn "$CFN_EXECUTION_ROLE_ARN"
+        env:
+          CFN_EXECUTION_ROLE_ARN: ${{ vars.CFN_EXECUTION_ROLE_ARN }}
