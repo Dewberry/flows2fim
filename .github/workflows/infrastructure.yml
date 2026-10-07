@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  validate-cdk-build:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
@@ -35,7 +35,7 @@ jobs:
       - run: uv run --locked  pyright
       - run: uv run --locked  cdk synth
 
-  deploy:
+  deploy-ecr-repo-with-cdk:
     if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     defaults:
